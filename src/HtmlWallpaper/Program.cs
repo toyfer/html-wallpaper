@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -10,9 +9,33 @@ namespace HtmlWallpaper;
 
 internal static class Native
 {
-    public const int WmSpawnWorker = 0x052C;
-    public const int SmtoNormal = 0x0000;
-    public const int SmtoAbortIfHung = 0x0002;
+    public const uint WmSpawnWorker = 0x052C;
+    public const uint SmtoNormal = 0x0000;
+    public const uint SmtoAbortIfHung = 0x0002;
+    public const int GwlStyle = -16;
+    public const int GwlExStyle = -20;
+    public const long WsChild = 0x40000000L;
+    public const long WsVisible = 0x10000000L;
+    public const long WsCaption = 0x00C00000L;
+    public const long WsSysMenu = 0x00080000L;
+    public const long WsThickFrame = 0x00040000L;
+    public const long WsMinimizeBox = 0x00020000L;
+    public const long WsMaximizeBox = 0x00010000L;
+    public const long WsPopup = unchecked((long)0x80000000L);
+    public const long WsExNoActivate = 0x08000000L;
+    public const long WsExToolWindow = 0x00000080L;
+    public const long WsExTransparent = 0x00000020L;
+    public const long WsExLayered = 0x00080000L;
+    public const long WsExNoRedirectionBitmap = 0x00200000L;
+    public const uint LwaAlpha = 0x00000002;
+    public const uint SwpNoActivate = 0x0010;
+    public const uint SwpFrameChanged = 0x0020;
+    public const uint SwpShowWindow = 0x0040;
+    public const uint SpiSetDeskWallpaper = 0x0014;
+    public const uint SpifUpdateIniFile = 0x01;
+    public const uint SpifSendChange = 0x02;
+    public const int SwShowNoActivate = 4;
+    public const int SwHide = 0;
     public static readonly IntPtr HwndBottom = new(1);
 
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -39,6 +62,21 @@ internal static class Native
 
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "GetWindowLongPtrW")]
+    public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "SetWindowLongPtrW")]
+    public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, string? pvParam, uint fWinIni);
 }
 
 internal sealed class Config
@@ -59,57 +97,120 @@ internal static class DesktopHost
         Native.SendMessageTimeout(
             progman,
             Native.WmSpawnWorker,
-            new IntPtr(0xD),
+            IntPtr.Zero,
             IntPtr.Zero,
             Native.SmtoNormal | Native.SmtoAbortIfHung,
             1000,
             out _);
+        Native.SendMessageTimeout(
+            progman,
+            Native.WmSpawnWorker,
+            new IntPtr(0xD),
+            new IntPtr(0x1),
+            Native.SmtoNormal | Native.SmtoAbortIfHung,
+            1000,
+            out _);
 
-        IntPtr worker = IntPtr.Zero;
+        var child = Native.FindWindowEx(progman, IntPtr.Zero, "WorkerW", null);
+        if (child != IntPtr.Zero)
+        {
+            return child;
+        }
+
+        IntPtr sibling = IntPtr.Zero;
         Native.EnumWindows((top, _) =>
         {
             var def = Native.FindWindowEx(top, IntPtr.Zero, "SHELLDLL_DefView", null);
             if (def != IntPtr.Zero)
             {
-                var next = Native.FindWindowEx(top, IntPtr.Zero, "WorkerW", null);
+                var next = Native.FindWindowEx(IntPtr.Zero, top, "WorkerW", null);
                 if (next != IntPtr.Zero)
                 {
-                    worker = next;
+                    sibling = next;
+                    return false;
                 }
             }
 
             return true;
         }, IntPtr.Zero);
 
-        if (worker == IntPtr.Zero)
+        if (sibling != IntPtr.Zero)
         {
-            worker = Native.FindWindowEx(progman, IntPtr.Zero, "WorkerW", null);
+            return sibling;
         }
 
-        if (worker == IntPtr.Zero)
-        {
-            throw new InvalidOperationException("WorkerW not found.");
-        }
-
-        return worker;
+        throw new InvalidOperationException("WorkerW not found.");
     }
 
-    public static void Attach(IntPtr hwnd, IntPtr worker)
+    public static bool IsRaisedDesktop()
     {
-        Native.SetParent(hwnd, worker);
+        var progman = Native.FindWindow("Progman", null);
+        if (progman == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        var ex = Native.GetWindowLongPtr(progman, Native.GwlExStyle).ToInt64();
+        if ((ex & Native.WsExNoRedirectionBitmap) != 0)
+        {
+            return true;
+        }
+
+        return Native.FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero;
+    }
+
+    public static void Attach(IntPtr hwnd)
+    {
+        if (!Native.IsWindow(hwnd))
+        {
+            throw new InvalidOperationException("Wallpaper window handle is gone.");
+        }
+
+        var worker = FindWorkerW();
+        var progman = Native.FindWindow("Progman", null);
+        var raised = IsRaisedDesktop();
+        var parent = raised && progman != IntPtr.Zero ? progman : worker;
+
+        var style = Native.GetWindowLongPtr(hwnd, Native.GwlStyle).ToInt64();
+        style &= ~(Native.WsCaption | Native.WsThickFrame | Native.WsSysMenu | Native.WsMinimizeBox | Native.WsMaximizeBox | Native.WsPopup);
+        style |= Native.WsChild | Native.WsVisible;
+        Native.SetWindowLongPtr(hwnd, Native.GwlStyle, new IntPtr(style));
+
+        var ex = Native.GetWindowLongPtr(hwnd, Native.GwlExStyle).ToInt64();
+        ex |= Native.WsExNoActivate | Native.WsExToolWindow | Native.WsExTransparent | Native.WsExLayered;
+        Native.SetWindowLongPtr(hwnd, Native.GwlExStyle, new IntPtr(ex));
+        Native.SetLayeredWindowAttributes(hwnd, 0, 255, Native.LwaAlpha);
+
+        Native.SetParent(hwnd, parent);
+
         var bounds = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
-        Native.SetWindowPos(hwnd, Native.HwndBottom, 0, 0, bounds.Width, bounds.Height, 0x0040);
-        Native.ShowWindow(hwnd, 5);
+        var defView = Native.FindWindowEx(parent, IntPtr.Zero, "SHELLDLL_DefView", null);
+        var insertAfter = raised && defView != IntPtr.Zero ? defView : Native.HwndBottom;
+        Native.SetWindowPos(
+            hwnd,
+            insertAfter,
+            0,
+            0,
+            bounds.Width,
+            bounds.Height,
+            Native.SwpNoActivate | Native.SwpShowWindow | Native.SwpFrameChanged);
+        Native.ShowWindow(hwnd, Native.SwShowNoActivate);
     }
 
     public static void Detach(IntPtr hwnd)
     {
-        if (hwnd == IntPtr.Zero)
+        if (hwnd == IntPtr.Zero || !Native.IsWindow(hwnd))
         {
             return;
         }
 
+        Native.ShowWindow(hwnd, Native.SwHide);
         Native.SetParent(hwnd, IntPtr.Zero);
+        Native.SystemParametersInfo(
+            Native.SpiSetDeskWallpaper,
+            0,
+            null,
+            Native.SpifUpdateIniFile | Native.SpifSendChange);
     }
 }
 
@@ -118,6 +219,7 @@ internal sealed class WallpaperForm : Form
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill };
     private readonly string _root;
     private readonly string _htmlPath;
+    private bool _ready;
     private bool _attached;
 
     public WallpaperForm(string root, string htmlPath)
@@ -130,19 +232,30 @@ internal sealed class WallpaperForm : Form
         StartPosition = FormStartPosition.Manual;
         Bounds = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
         BackColor = Color.Black;
+        ShowIcon = false;
         Controls.Add(_web);
     }
 
     public async Task StartAsync()
     {
-        var data = Path.Combine(_root, "webview2-data");
-        Directory.CreateDirectory(data);
-        var env = await CoreWebView2Environment.CreateAsync(null, data);
-        await _web.EnsureCoreWebView2Async(env);
-        _web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
-        _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
-        _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
-        _web.CoreWebView2.Navigate(new Uri(_htmlPath).AbsoluteUri);
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        if (!_ready)
+        {
+            var data = Path.Combine(_root, "webview2-data");
+            Directory.CreateDirectory(data);
+            var env = await CoreWebView2Environment.CreateAsync(null, data);
+            await _web.EnsureCoreWebView2Async(env);
+            _web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+            _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
+            _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
+            _web.CoreWebView2.Navigate(new Uri(_htmlPath).AbsoluteUri);
+            _ready = true;
+        }
+
         Attach();
     }
 
@@ -154,7 +267,7 @@ internal sealed class WallpaperForm : Form
         }
 
         Show();
-        DesktopHost.Attach(Handle, DesktopHost.FindWorkerW());
+        DesktopHost.Attach(Handle);
         _attached = true;
     }
 
