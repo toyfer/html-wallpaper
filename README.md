@@ -1,14 +1,15 @@
 # HtmlWallpaper
 
-Windows 11 desktop wallpaper from a local HTML file. Tray only: start, stop, quit. No admin. One folder.
+Windows 11 desktop wallpaper from a local HTML file. Tray only: start, stop, open HTML, quit. No admin. One folder.
 
 ## What it does
 
-- Renders `wallpaper.html` with WebView2.
+- Renders a local HTML file with WebView2.
 - Parents that window to Explorer's `WorkerW` so it sits under desktop icons.
-- Does not call `SPI_SETDESKWALLPAPER`. The system still image comes back when the window is detached.
+- Detach restores the system still image.
 - Runs `asInvoker`. No UAC. Not a Windows service.
 - Keeps WebView2 user data next to the exe (`webview2-data/`). No `%AppData%`.
+- Start re-reads `config.json` and reloads the HTML (cache ignored). Quit is not required.
 
 ## Requirements
 
@@ -30,8 +31,9 @@ Tray menu:
 
 | item | action |
 |---|---|
-| Start | attach HTML to WorkerW |
+| Start | re-read `config.json`, reload HTML + CSS/JS, attach to WorkerW |
 | Stop | detach, restore the still wallpaper, keep the process |
+| Open HTML... | pick a file, write it to `config.json`, load it |
 | Quit | stop, then exit |
 
 CLI:
@@ -41,7 +43,35 @@ HtmlWallpaper.exe          # start wallpaper, stay in tray
 HtmlWallpaper.exe --quit   # tell a running instance to quit
 ```
 
-A second launch while one is running just focuses the existing tray instance. `--quit` is the only extra switch.
+A second launch while one is running does nothing except `--quit`.
+
+## HTML, CSS, JS
+
+WebView2 is a browser. Relative links next to the HTML already load:
+
+```html
+<link rel="stylesheet" href="style.css">
+<script src="app.js"></script>
+<img src="img/bg.png">
+```
+
+```
+clock/
+  index.html
+  style.css
+  app.js
+  img/
+```
+
+`config.json`:
+
+```json
+{ "html": "clock/index.html" }
+```
+
+Same folder, a subfolder, or an absolute path. CSS/JS/images resolve from the HTML file, not from the exe. No extra app code is required for that.
+
+`file://` pages cannot use some HTTPS-only APIs (camera, geolocation, notifications). `localStorage` is per file path.
 
 ## Layout
 
@@ -53,8 +83,6 @@ src/HtmlWallpaper/
   wallpaper.html      sample page
   config.json         { "html": "wallpaper.html" }
 ```
-
-Edit `wallpaper.html` or point `config.json` at another file in the same folder.
 
 ## Build
 

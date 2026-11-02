@@ -84,6 +84,63 @@ internal sealed class Config
     public string Html { get; set; } = "wallpaper.html";
 }
 
+internal static class Paths
+{
+    public static string Root =>
+        AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+    public static string ConfigFile => Path.Combine(Root, "config.json");
+
+    public static Config LoadConfig()
+    {
+        if (!File.Exists(ConfigFile))
+        {
+            return new Config();
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<Config>(File.ReadAllText(ConfigFile)) ?? new Config();
+        }
+        catch (JsonException)
+        {
+            return new Config();
+        }
+    }
+
+    public static void SaveConfig(Config config)
+    {
+        var json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(ConfigFile, json + Environment.NewLine);
+    }
+
+    public static string ResolveHtml(Config config)
+    {
+        var raw = string.IsNullOrWhiteSpace(config.Html) ? "wallpaper.html" : config.Html.Trim();
+        var full = Path.IsPathRooted(raw)
+            ? Path.GetFullPath(raw)
+            : Path.GetFullPath(Path.Combine(Root, raw));
+        if (File.Exists(full))
+        {
+            return full;
+        }
+
+        return Path.Combine(Root, "wallpaper.html");
+    }
+
+    public static string ToConfigValue(string fullPath)
+    {
+        var full = Path.GetFullPath(fullPath);
+        var prefix = Root + Path.DirectorySeparatorChar;
+        if (full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return full[prefix.Length..].Replace(Path.DirectorySeparatorChar, '/');
+        }
+
+        return full;
+    }
+}
+
 internal static class DesktopHost
 {
     public static IntPtr FindWorkerW()
@@ -217,14 +274,12 @@ internal static class DesktopHost
 internal sealed class WallpaperForm : Form
 {
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill };
-    private readonly string _root;
-    private readonly string _htmlPath;
     private bool _ready;
     private bool _attached;
+    private string _htmlPath;
 
-    public WallpaperForm(string root, string htmlPath)
+    public WallpaperForm(string htmlPath)
     {
-        _root = root;
         _htmlPath = htmlPath;
         Text = "HtmlWallpaper";
         ShowInTaskbar = false;
@@ -243,32 +298,44 @@ internal sealed class WallpaperForm : Form
             return;
         }
 
-        if (!_ready)
+        _htmlPath = Paths.ResolveHtml(Paths.LoadConfig());
+        if (!File.Exists(_htmlPath))
         {
-            var data = Path.Combine(_root, "webview2-data");
-            Directory.CreateDirectory(data);
-            var env = await CoreWebView2Environment.CreateAsync(null, data);
-            await _web.EnsureCoreWebView2Async(env);
-            _web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
-            _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
-            _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
-            _web.CoreWebView2.Navigate(new Uri(_htmlPath).AbsoluteUri);
-            _ready = true;
+            throw new FileNotFoundException("HTML not found.", _htmlPath);
         }
 
+        await EnsureWebAsync();
+        await NavigateAsync(_htmlPath);
         Attach();
     }
 
-    public void Attach()
+    public async Task OpenHtmlAsync()
     {
         if (IsDisposed)
         {
             return;
         }
 
-        Show();
-        DesktopHost.Attach(Handle);
-        _attached = true;
+        using var dlg = new OpenFileDialog
+        {
+            Title = "HTML wallpaper",
+            Filter = "HTML|*.html;*.htm|All|*.*",
+            InitialDirectory = Paths.Root,
+            RestoreDirectory = true,
+            CheckFileExists = true
+        };
+
+        if (dlg.ShowDialog() != DialogResult.OK)
+        {
+            return;
+        }
+
+        var full = Path.GetFullPath(dlg.FileName);
+        Paths.SaveConfig(new Config { Html = Paths.ToConfigValue(full) });
+        _htmlPath = full;
+        await EnsureWebAsync();
+        await NavigateAsync(_htmlPath);
+        Attach();
     }
 
     public void StopWallpaper()
@@ -281,6 +348,63 @@ internal sealed class WallpaperForm : Form
         DesktopHost.Detach(Handle);
         _attached = false;
         Hide();
+    }
+
+    private async Task EnsureWebAsync()
+    {
+        if (_ready)
+        {
+            return;
+        }
+
+        var data = Path.Combine(Paths.Root, "webview2-data");
+        Directory.CreateDirectory(data);
+        var env = await CoreWebView2Environment.CreateAsync(null, data);
+        await _web.EnsureCoreWebView2Async(env);
+        _web.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+        _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
+        _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
+        _ready = true;
+    }
+
+    private async Task NavigateAsync(string htmlPath)
+    {
+        var target = new Uri(htmlPath).AbsoluteUri;
+        var current = _web.CoreWebView2.Source ?? "";
+        if (SameFileUrl(current, target))
+        {
+            await _web.CoreWebView2.CallDevToolsProtocolMethodAsync("Page.reload", "{\"ignoreCache\":true}");
+            return;
+        }
+
+        _web.CoreWebView2.Navigate(target);
+    }
+
+    private static bool SameFileUrl(string current, string target)
+    {
+        static string Strip(string value)
+        {
+            if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
+            {
+                return value;
+            }
+
+            return uri.GetLeftPart(UriPartial.Path);
+        }
+
+        return string.Equals(Strip(current), Strip(target), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void Attach()
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        Show();
+        DesktopHost.Attach(Handle);
+        _attached = true;
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -360,21 +484,7 @@ internal static class App
         ApplicationConfiguration.Initialize();
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
 
-        var root = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var configPath = Path.Combine(root, "config.json");
-        var config = new Config();
-        if (File.Exists(configPath))
-        {
-            config = JsonSerializer.Deserialize<Config>(File.ReadAllText(configPath)) ?? config;
-        }
-
-        var html = Path.GetFullPath(Path.Combine(root, config.Html));
-        if (!html.StartsWith(root, StringComparison.OrdinalIgnoreCase) || !File.Exists(html))
-        {
-            html = Path.Combine(root, "wallpaper.html");
-        }
-
-        var form = new WallpaperForm(root, html);
+        var form = new WallpaperForm(Paths.ResolveHtml(Paths.LoadConfig()));
         var cts = new CancellationTokenSource();
         NotifyIcon? tray = null;
         var quitting = false;
@@ -406,6 +516,11 @@ internal static class App
             catch (Exception ex) { ShowError(ex); }
         });
         menu.Items.Add("Stop", null, (_, _) => form.StopWallpaper());
+        menu.Items.Add("Open HTML...", null, async (_, _) =>
+        {
+            try { await form.OpenHtmlAsync(); }
+            catch (Exception ex) { ShowError(ex); }
+        });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Quit", null, (_, _) => Shutdown());
 
