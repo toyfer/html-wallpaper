@@ -28,6 +28,21 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Tray icon
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $svg = "src/HtmlWallpaper/tray.svg"
+          $ico = "src/HtmlWallpaper/tray.ico"
+          if (-not (Test-Path $svg)) { throw "tray.svg missing" }
+          if (-not (Get-Command magick -ErrorAction SilentlyContinue)) {
+            choco install imagemagick.app -y --no-progress
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          }
+          magick -background none $svg -define icon:auto-resize=48,32,16 $ico
+          if (-not (Test-Path $ico)) { throw "tray.ico was not produced" }
+          Write-Host "tray.ico $((Get-Item $ico).Length) bytes"
+
       - name: Restore
         run: dotnet restore src/HtmlWallpaper/HtmlWallpaper.csproj
 
@@ -51,6 +66,7 @@ jobs:
           }
           if (-not (Test-Path src/HtmlWallpaper/wallpaper.html)) { throw "wallpaper.html missing" }
           if (-not (Test-Path src/HtmlWallpaper/config.json)) { throw "config.json missing" }
+          if (-not (Test-Path src/HtmlWallpaper/tray.svg)) { throw "tray.svg missing" }
           Write-Host "static checks passed"
 
       - name: Publish portable
@@ -76,7 +92,7 @@ jobs:
           | artifact | $zip ($size bytes) |
           | event | ${{ github.event_name }} |
 
-          Portable folder is next to the exe. No AppData. asInvoker. Tray start / stop / quit.
+          Portable folder is next to the exe. No AppData. asInvoker. Tray icon is built from tray.svg.
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
       - uses: actions/upload-artifact@v4

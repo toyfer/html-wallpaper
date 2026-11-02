@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -527,7 +528,7 @@ internal static class App
         tray = new NotifyIcon
         {
             Text = "HtmlWallpaper",
-            Icon = SystemIcons.Application,
+            Icon = TrayIcon(),
             Visible = true,
             ContextMenuStrip = menu
         };
@@ -566,6 +567,20 @@ internal static class App
         };
 
         Application.Run(form);
+    }
+
+    private static Icon TrayIcon()
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var name = asm.GetManifestResourceNames()
+            .FirstOrDefault(n => n.EndsWith("tray.ico", StringComparison.OrdinalIgnoreCase));
+        if (name is null)
+        {
+            return SystemIcons.Application;
+        }
+
+        using var stream = asm.GetManifestResourceStream(name);
+        return stream is null ? SystemIcons.Application : new Icon(stream);
     }
 
     private static void ShowError(Exception ex)

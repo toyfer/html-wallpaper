@@ -6,3 +6,4 @@ dist/
 .vs/
 HtmlWallpaper.WebView2/
 webview2-data/
+src/HtmlWallpaper/tray.ico

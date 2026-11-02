@@ -22,5 +22,6 @@
     <None Update="config.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <EmbeddedResource Include="tray.ico" Condition="Exists('tray.ico')" />
   </ItemGroup>
 </Project>
