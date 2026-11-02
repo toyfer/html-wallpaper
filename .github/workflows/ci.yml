@@ -1,0 +1,161 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build-windows
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    outputs:
+      outcome: ${{ job.status }}
+      artifact: ${{ steps.pack.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore src/HtmlWallpaper/HtmlWallpaper.csproj
+
+      - name: Build
+        run: dotnet build src/HtmlWallpaper/HtmlWallpaper.csproj -c Release --no-restore
+
+      - name: Test
+        run: |
+          $ErrorActionPreference = "Stop"
+          $csproj = "src/HtmlWallpaper/HtmlWallpaper.csproj"
+          $xml = [xml](Get-Content $csproj)
+          $ns = @{msbuild="http://schemas.microsoft.com/developer/msbuild/2003"}
+          $requested = $xml.SelectSingleNode("//*[local-name()='RequestedExecutionLevel']")
+          if ($requested -and $requested.InnerText -notmatch "asInvoker") {
+            throw "app.manifest must request asInvoker"
+          }
+          $manifest = Get-Content -Raw src/HtmlWallpaper/app.manifest
+          if ($manifest -notmatch 'requestedExecutionLevel\s+level="asInvoker"') {
+            throw "app.manifest must request asInvoker"
+          }
+          $program = Get-Content -Raw src/HtmlWallpaper/Program.cs
+          foreach ($needle in @("NotifyIcon", "SetParent", "WorkerW", "--quit", "ApplicationData")) {
+            if ($needle -eq "ApplicationData") {
+              if ($program -match "ApplicationData") { throw "must not use ApplicationData" }
+            } elseif ($program -notmatch [regex]::Escape($needle)) {
+              throw "Program.cs missing $needle"
+            }
+          }
+          if (-not (Test-Path src/HtmlWallpaper/wallpaper.html)) { throw "wallpaper.html missing" }
+          if (-not (Test-Path src/HtmlWallpaper/config.json)) { throw "config.json missing" }
+          Write-Host "static checks passed"
+
+      - name: Publish portable
+        id: pack
+        run: |
+          $out = "dist/HtmlWallpaper"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          dotnet publish src/HtmlWallpaper/HtmlWallpaper.csproj -c Release -r win-x64 --self-contained false -o $out /p:DebugType=None /p:DebugSymbols=false
+          if (-not (Test-Path "$out/HtmlWallpaper.exe")) { throw "publish did not produce HtmlWallpaper.exe" }
+          $zip = "HtmlWallpaper-win-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path "$out/*" -DestinationPath $zip
+          "artifact=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $size = (Get-Item $zip).Length
+          "zip-bytes=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $summary = @(
+            "## Build"
+            ""
+            "| field | value |"
+            "|---|---|"
+            "| status | success |"
+            "| runner | ${{ runner.os }} |"
+            "| commit | `${{ github.sha }}` |"
+            "| artifact | `$zip` ($size bytes) |"
+            "| event | ${{ github.event_name }} |"
+            ""
+            "Portable folder is next to the exe. No AppData. asInvoker. Tray start / stop / quit."
+          ) -join "`n"
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HtmlWallpaper-win-x64
+          path: HtmlWallpaper-win-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  report:
+    name: write-ci-issue
+    needs: build
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Upsert pinned CI issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ needs.build.result }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          LABEL=ci-report
+          gh label create "$LABEL" --repo "$GITHUB_REPOSITORY" --color "0E8A16" --description "CI writes results here" 2>/dev/null || true
+          ISSUE_JSON=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "$LABEL" --state open --json number,title --jq '[.[] | select(.title=="CI results")] | .[0]')
+          MARKER="<!-- html-wallpaper-ci -->"
+          STAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+          if [ "$OUTCOME" = "success" ]; then
+            BADGE=pass
+          else
+            BADGE=fail
+          fi
+          BODY=$(cat <<EOF
+          $MARKER
+          Latest Actions result, mirrored so it can be read without the Actions tab.
+
+          | field | value |
+          |---|---|
+          | status | **$BADGE** (`$OUTCOME`) |
+          | when | $STAMP |
+          | event | `$EVENT` |
+          | ref | `$REF` |
+          | commit | `$SHA` |
+          | actor | `$ACTOR` |
+          | run | $RUN_URL |
+
+          Comments below are one line per run. Open comments are the log.
+          EOF
+          )
+          if [ -z "$ISSUE_JSON" ] || [ "$ISSUE_JSON" = "null" ]; then
+            NUM=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "CI results" --label "$LABEL" --body "$BODY" --json number --jq .number)
+          else
+            NUM=$(printf '%s' "$ISSUE_JSON" | jq -r .number)
+            gh issue edit "$NUM" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          fi
+          COMMENT=$(cat <<EOF
+          $MARKER
+          **$BADGE** `$OUTCOME` · $STAMP · `$EVENT` · `${SHA:0:7}` · [run $RUN_ID]($RUN_URL)
+          EOF
+          )
+          gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body "$COMMENT"
+          echo "wrote issue #$NUM"

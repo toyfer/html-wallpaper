@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HtmlWallpaper</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1220; color: #e8eefc; font-family: "Segoe UI", sans-serif; }
+    body { display: grid; place-items: center; }
+    .card { text-align: center; letter-spacing: .04em; }
+    h1 { font-weight: 500; font-size: 42px; margin: 0 0 12px; }
+    p { opacity: .7; margin: 0; }
+    .orb {
+      width: 280px; height: 280px; border-radius: 50%;
+      margin: 0 auto 28px;
+      background: radial-gradient(circle at 30% 30%, #7dd3fc, #1d4ed8 55%, #0b1220 72%);
+      animation: drift 14s ease-in-out infinite;
+      filter: blur(0.2px);
+    }
+    @keyframes drift {
+      0%, 100% { transform: translateY(0) scale(1); }
+      50% { transform: translateY(-18px) scale(1.04); }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="orb"></div>
+    <h1>HtmlWallpaper</h1>
+    <p>local HTML · tray start / stop / quit</p>
+  </div>
+</body>
+</html>
