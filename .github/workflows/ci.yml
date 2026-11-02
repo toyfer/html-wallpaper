@@ -21,9 +21,6 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
-    outputs:
-      outcome: ${{ job.status }}
-      artifact: ${{ steps.pack.outputs.artifact }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,13 +37,6 @@ jobs:
       - name: Test
         run: |
           $ErrorActionPreference = "Stop"
-          $csproj = "src/HtmlWallpaper/HtmlWallpaper.csproj"
-          $xml = [xml](Get-Content $csproj)
-          $ns = @{msbuild="http://schemas.microsoft.com/developer/msbuild/2003"}
-          $requested = $xml.SelectSingleNode("//*[local-name()='RequestedExecutionLevel']")
-          if ($requested -and $requested.InnerText -notmatch "asInvoker") {
-            throw "app.manifest must request asInvoker"
-          }
           $manifest = Get-Content -Raw src/HtmlWallpaper/app.manifest
           if ($manifest -notmatch 'requestedExecutionLevel\s+level="asInvoker"') {
             throw "app.manifest must request asInvoker"
@@ -75,21 +65,19 @@ jobs:
           Compress-Archive -Path "$out/*" -DestinationPath $zip
           "artifact=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           $size = (Get-Item $zip).Length
-          "zip-bytes=$size" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          $summary = @(
-            "## Build"
-            ""
-            "| field | value |"
-            "|---|---|"
-            "| status | success |"
-            "| runner | ${{ runner.os }} |"
-            "| commit | `${{ github.sha }}` |"
-            "| artifact | `$zip` ($size bytes) |"
-            "| event | ${{ github.event_name }} |"
-            ""
-            "Portable folder is next to the exe. No AppData. asInvoker. Tray start / stop / quit."
-          ) -join "`n"
-          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          @"
+          ## Build
+
+          | field | value |
+          |---|---|
+          | status | success |
+          | runner | ${{ runner.os }} |
+          | commit | ${{ github.sha }} |
+          | artifact | $zip ($size bytes) |
+          | event | ${{ github.event_name }} |
+
+          Portable folder is next to the exe. No AppData. asInvoker. Tray start / stop / quit.
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
 
       - uses: actions/upload-artifact@v4
         with:
@@ -121,40 +109,37 @@ jobs:
           set -euo pipefail
           LABEL=ci-report
           gh label create "$LABEL" --repo "$GITHUB_REPOSITORY" --color "0E8A16" --description "CI writes results here" 2>/dev/null || true
-          ISSUE_JSON=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "$LABEL" --state open --json number,title --jq '[.[] | select(.title=="CI results")] | .[0]')
+          NUM=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "$LABEL" --state open --json number,title --jq '.[] | select(.title=="CI results") | .number' | head -n 1)
           MARKER="<!-- html-wallpaper-ci -->"
           STAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
-          if [ "$OUTCOME" = "success" ]; then
-            BADGE=pass
-          else
-            BADGE=fail
-          fi
+          if [ "$OUTCOME" = "success" ]; then BADGE=pass; else BADGE=fail; fi
           BODY=$(cat <<EOF
           $MARKER
           Latest Actions result, mirrored so it can be read without the Actions tab.
 
           | field | value |
           |---|---|
-          | status | **$BADGE** (`$OUTCOME`) |
+          | status | **$BADGE** (\`$OUTCOME\`) |
           | when | $STAMP |
-          | event | `$EVENT` |
-          | ref | `$REF` |
-          | commit | `$SHA` |
-          | actor | `$ACTOR` |
+          | event | \`$EVENT\` |
+          | ref | \`$REF\` |
+          | commit | \`$SHA\` |
+          | actor | \`$ACTOR\` |
           | run | $RUN_URL |
 
           Comments below are one line per run. Open comments are the log.
           EOF
           )
-          if [ -z "$ISSUE_JSON" ] || [ "$ISSUE_JSON" = "null" ]; then
-            NUM=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "CI results" --label "$LABEL" --body "$BODY" --json number --jq .number)
+          if [ -z "${NUM:-}" ]; then
+            URL=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "CI results" --label "$LABEL" --body "$BODY")
+            NUM="${URL##*/}"
           else
-            NUM=$(printf '%s' "$ISSUE_JSON" | jq -r .number)
             gh issue edit "$NUM" --repo "$GITHUB_REPOSITORY" --body "$BODY"
           fi
+          SHORT="${SHA:0:7}"
           COMMENT=$(cat <<EOF
           $MARKER
-          **$BADGE** `$OUTCOME` · $STAMP · `$EVENT` · `${SHA:0:7}` · [run $RUN_ID]($RUN_URL)
+          **$BADGE** \`$OUTCOME\` · $STAMP · \`$EVENT\` · \`$SHORT\` · [run $RUN_ID]($RUN_URL)
           EOF
           )
           gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body "$COMMENT"
